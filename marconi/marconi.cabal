@@ -52,6 +52,7 @@ library
     Marconi.CLI
     Marconi.Index.Datum
     Marconi.Index.EpochStakepoolSize
+    Marconi.Index.MintBurn
     Marconi.Index.ScriptTx
     Marconi.Index.Utxo
     Marconi.Indexers
@@ -73,6 +74,7 @@ library
     , cardano-api
     , cardano-binary
     , cardano-ledger-alonzo
+    , cardano-ledger-babbage
     , cardano-ledger-core
     , cardano-ledger-shelley
     , cardano-ledger-shelley-ma

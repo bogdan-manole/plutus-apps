@@ -35,6 +35,7 @@ import Control.Concurrent.STM.TMVar (TMVar)
 import Marconi.Index.Datum (DatumIndex)
 import Marconi.Index.Datum qualified as Datum
 import Marconi.Index.EpochStakepoolSize qualified as EpochStakepoolSize
+import Marconi.Index.MintBurn qualified as MintBurn
 import Marconi.Index.ScriptTx qualified as ScriptTx
 import Marconi.Index.Utxo qualified as Utxo
 import Marconi.Types (TargetAddresses)
@@ -152,6 +153,8 @@ utxoWorker indexerCallback maybeTargetAddresses Coordinator{_barrier, _channel} 
               offset <- findIndex  (\u -> (u ^. Utxo.utxoEventSlotNo) < slot) events
               Ix.rewind offset index
 
+-- * ScriptTx indexer
+
 scriptTxWorker_
   :: (Storable.StorableEvent ScriptTx.ScriptTxHandle -> IO [()])
   -> ScriptTx.Depth
@@ -189,6 +192,8 @@ newtype UtxoQueryTMVar = UtxoQueryTMVar
     { unUtxoIndex  :: TMVar Utxo.UtxoIndex      -- ^ for query thread to access in-memory utxos
     }
 
+-- * Epoch stakepool size indexer
+
 epochStakepoolSizeWorker :: FilePath -> Worker
 epochStakepoolSizeWorker configPath Coordinator{_barrier,_channel} dbPath = do
   tchan <- atomically $ dupTChan _channel
@@ -211,16 +216,39 @@ epochStakepoolSizeWorker configPath Coordinator{_barrier,_channel} dbPath = do
   void . forkIO $ S.effects indexer
   pure [ChainPointAtGenesis]
 
+-- * Mint/burn indexer
+
+mintBurnWorker :: Worker
+mintBurnWorker Coordinator{_barrier, _channel} path = do
+  ch <- atomically . dupTChan $ _channel
+  let
+    innerLoop :: MintBurn.MintBurnIndex -> IO ()
+    innerLoop index = do
+      signalQSemN _barrier 1
+      event <- atomically $ readTChan ch
+      case event of
+        RollForward blockInMode _ct -> Ix.insert (MintBurn.toUpdate blockInMode) index >>= innerLoop
+        RollBackward cp _ct -> do
+          events <- Ix.getEvents (index ^. Ix.storage)
+          innerLoop $
+            fromMaybe index $ do
+              slot   <- chainPointToSlotNo cp
+              offset <- findIndex  (\e -> MintBurn.txMintEventSlot e < slot) events
+              Ix.rewind offset index
+
+  void . forkIO $ MintBurn.open path 2160 >>= innerLoop
+  pure [ChainPointAtGenesis]
 
 filterIndexers
   :: Maybe FilePath
   -> Maybe FilePath
   -> Maybe FilePath
   -> Maybe FilePath
+  -> Maybe FilePath
   -> Maybe TargetAddresses
   -> Maybe FilePath
   -> [(Worker, FilePath)]
-filterIndexers utxoPath datumPath scriptTxPath epochStakepoolSizePath maybeTargetAddresses maybeConfigPath =
+filterIndexers utxoPath datumPath scriptTxPath epochStakepoolSizePath mintBurnPath maybeTargetAddresses maybeConfigPath =
   mapMaybe liftMaybe pairs
   where
     liftMaybe (worker, maybePath) = case maybePath of
@@ -234,6 +262,7 @@ filterIndexers utxoPath datumPath scriptTxPath epochStakepoolSizePath maybeTarge
         [ (utxoWorker pure maybeTargetAddresses, utxoPath)
         , (datumWorker, datumPath)
         , (scriptTxWorker (\_ -> pure []), scriptTxPath)
+        , (mintBurnWorker, mintBurnPath)
         ] <> epochStakepoolSizeIndexer
 
 startIndexers
