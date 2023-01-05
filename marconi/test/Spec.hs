@@ -21,6 +21,7 @@ import Marconi.Index.ScriptTx qualified as ScriptTx
 
 import EpochStakepoolSize qualified
 import Integration qualified
+import MintBurn qualified
 import Spec.Utxo qualified
 
 main :: IO ()
@@ -32,6 +33,7 @@ tests = testGroup "Marconi"
   , Spec.Utxo.tests
   , Integration.tests
   , EpochStakepoolSize.tests
+  , MintBurn.tests
   ]
 
 -- | Create @nScripts@ scripts, add them to a transaction body, then
