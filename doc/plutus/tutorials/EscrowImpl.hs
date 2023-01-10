@@ -58,7 +58,7 @@ import Ledger (POSIXTime, PaymentPubKeyHash (unPaymentPubKeyHash), ScriptContext
 import Ledger qualified
 import Ledger.Constraints (TxConstraints)
 import Ledger.Constraints qualified as Constraints
-import Ledger.Constraints.Interval qualified as Interval
+import Ledger.Constraints.ValidityInterval qualified as Interval
 import Ledger.Interval (after, before, from)
 import Ledger.Tx qualified as Tx
 import Ledger.Typed.Scripts (TypedValidator)
@@ -270,7 +270,7 @@ pay ::
 pay inst escrow vl = do
     pk <- ownFirstPaymentPubKeyHash
     let tx = Constraints.mustPayToTheScriptWithDatumHash pk vl
-          <> Constraints.mustValidateInTimeRange (Ledger.interval 1 (escrowDeadline escrow))
+          <> Constraints.mustValidateInTimeRange (Interval.interval 1 (1 + escrowDeadline escrow))
     utx <- mkTxConstraints (Constraints.typedValidatorLookups inst) tx >>= adjustUnbalancedTx
     getCardanoTxId <$> submitUnbalancedTx utx
 
@@ -344,7 +344,7 @@ refund inst escrow = do
     let pkh = Scripts.datumHash $ Datum $ PlutusTx.toBuiltinData pk
     let flt _ ciTxOut = has (Tx.decoratedTxOutScriptDatum . _1 . only pkh) ciTxOut
         tx' = Constraints.collectFromTheScriptFilter flt unspentOutputs Refund
-                <> Constraints.mustValidateInTimeRange (from (Haskell.succ $ escrowDeadline escrow))
+                <> Constraints.mustValidateInTimeRange (Interval.from (Haskell.succ $ escrowDeadline escrow))
     if Constraints.modifiesUtxoSet tx'
     then do
         utx <- mkTxConstraints ( Constraints.typedValidatorLookups inst
