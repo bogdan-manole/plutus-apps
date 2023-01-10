@@ -15,7 +15,7 @@ import Control.Concurrent.STM (atomically)
 import Control.Concurrent.STM.TChan (TChan, dupTChan, newBroadcastTChanIO, readTChan, writeTChan)
 import Control.Lens (view, (&))
 import Control.Lens.Operators ((^.))
-import Control.Monad (void)
+import Control.Monad (forever, void)
 import Control.Monad.Trans.Class (lift)
 import Data.List (findIndex, foldl1', intersect)
 import Data.Map (Map)
@@ -218,26 +218,26 @@ epochStakepoolSizeWorker configPath Coordinator{_barrier,_channel} dbPath = do
 
 -- * Mint/burn indexer
 
-mintBurnWorker :: Worker
-mintBurnWorker Coordinator{_barrier, _channel} path = do
-  ch <- atomically . dupTChan $ _channel
+mintBurnWorker_ :: Int -> Coordinator -> TChan (ChainSyncEvent (BlockInMode CardanoMode)) -> FilePath -> IO (IO b, MVar MintBurn.MintBurnIndex2)
+mintBurnWorker_ depth Coordinator{_barrier} ch path = do
+  indexerMVar <- newMVar =<< MintBurn.open path depth
   let
-    innerLoop :: MintBurn.MintBurnIndex -> IO ()
-    innerLoop index = do
+    loop = forever $ do
       signalQSemN _barrier 1
       event <- atomically $ readTChan ch
       case event of
-        RollForward blockInMode _ct -> Ix.insert (MintBurn.toUpdate blockInMode) index >>= innerLoop
-        RollBackward cp _ct -> do
-          events <- Ix.getEvents (index ^. Ix.storage)
-          innerLoop $
-            fromMaybe index $ do
-              slot   <- chainPointToSlotNo cp
-              offset <- findIndex  (\e -> MintBurn.txMintEventSlot e < slot) events
-              Ix.rewind offset index
+        RollForward blockInMode _ct ->
+          modifyMVar_ indexerMVar (Storable.insert $ MintBurn.MintBurnEvent $ MintBurn.toUpdate blockInMode)
+        RollBackward cp _ct ->
+          modifyMVar_ indexerMVar $ \ix -> fromMaybe ix <$> Storable.rewind cp ix
+  pure (loop, indexerMVar)
 
-  void . forkIO $ MintBurn.open path 2160 >>= innerLoop
-  pure [ChainPointAtGenesis]
+mintBurnWorker :: Worker
+mintBurnWorker coordinator path = do
+  workerChannel <- atomically . dupTChan $ _channel coordinator
+  (loop, ix) <- mintBurnWorker_ 2160 coordinator workerChannel path
+  void $ forkIO loop
+  readMVar ix >>= Storable.resumeFromStorage . view Storable.handle
 
 filterIndexers
   :: Maybe FilePath

@@ -7,6 +7,7 @@
 module MintBurn where
 
 import Codec.Serialise (serialise)
+import Control.Concurrent qualified as IO
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString.Short qualified as SBS
@@ -35,13 +36,13 @@ import PlutusTx.Builtins qualified as BI
 
 import Marconi.Index.MintBurn qualified as MintBurn
 import Marconi.Indexers qualified as Indexers
-import RewindableIndex.Index.VSplit qualified as RewindableIndex
-import RewindableIndex.Storable qualified as Storable
+import RewindableIndex.Index.VSplit qualified as RI
+import RewindableIndex.Storable qualified as RIStorable
 
 import Helpers qualified
 
 hot :: IO ()
-hot = defaultMain tests
+hot = defaultMain $ testGroup "Hot" [testPropertyNamed "prop_2" "2" queryMintedValues]
 
 tests :: TestTree
 tests = testGroup "MintBurn"
@@ -95,34 +96,25 @@ mintsPreserved = H.property $ do
 -- worker from Marconi.Indexers :(.
 queryMintedValues :: Property
 queryMintedValues = H.property $ do
-  dbPath :: FilePath <- undefined
-
   tx1 <- H.leftFail =<< forAll (genTxMintN 1)
   tx2 <- H.leftFail =<< forAll (genTxMintN 2)
   tx3 <- H.leftFail =<< forAll (genTxMintN 3)
+  MintBurn.MintBurnResult res <- liftIO $ do
+    let index tx indexerMVar = do
+          let event = MintBurn.MintBurnEvent $ MintBurn.TxMintEvent 0 0 [MintBurn.txMints tx]
+          IO.modifyMVar_ indexerMVar (RIStorable.insert event)
+    indexerMVar <- IO.newMVar =<< MintBurn.open ":memory:" 10
+    index tx1 indexerMVar
+    index tx2 indexerMVar
+    index tx3 indexerMVar
 
-  _ <- liftIO $ do
-    let index tx indexer = RewindableIndex.insert (MintBurn.TxMintEvent undefined undefined [MintBurn.txMints tx]) indexer
-    indexer <- MintBurn.open dbPath 1 >>= index tx1 >>= index tx2 >>= index tx3
-    Storable.query Storable.QEverything indexer undefined -- (ScriptTx.ScriptTxAddress plutusScriptHash)
-    -- JÄRG
-  undefined
-  undefined
+    let doQuery indexer = RIStorable.query RIStorable.QEverything indexer (MintBurn.MintBurnQuery $ const True)
+    indexer <- IO.readMVar indexerMVar
+    doQuery indexer
 
-  where
-    blocks :: S.Stream (S.Of (CS.ChainSyncEvent (C.BlockInMode C.CardanoMode))) IO r
-    blocks = loop 1
-      where
-        loop slotNo = do
+  assert $ length res == 3
 
-          let
-            bim :: C.BlockInMode C.CardanoMode
-            bim = undefined -- C.BlockInMode (C.ShelleyBlock undefined) C.AlonzoEraInCardanoMode --  (C.Block (C.BlockHeader slotNo _ blockNo) txs)
-            ct = C.ChainTip slotNo (undefined :: C.Hash C.BlockHeader) (undefined :: C.BlockNo)
-
-          S.yield $ CS.RollForward bim ct
-
-          loop (succ slotNo)
+--  error "queryMintedValues"
 
 rewind :: Property
 rewind = undefined
@@ -178,6 +170,7 @@ genTx txMintValue = do
     txb <- C.makeTransactionBody txbc'
     pure $ C.signShelleyTransaction txb []
 
+-- | Generate tx with minting
 genTxMintN :: Int -> Gen (Either C.TxBodyError (C.Tx C.AlonzoEra))
 genTxMintN n = genTx mintValue
   where

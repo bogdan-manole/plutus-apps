@@ -14,10 +14,12 @@ import Control.Monad.IO.Class (liftIO)
 import Data.ByteString qualified as BS
 import Data.ByteString.Short qualified as Short
 import Data.Coerce (coerce)
+import Data.Foldable
 import Data.Map qualified as Map
 import Data.Maybe (fromJust)
 import Data.Word (Word64)
 import Database.SQLite.Simple qualified as SQL
+import Database.SQLite.Simple.FromField qualified as SQL
 import Database.SQLite.Simple.ToField qualified as SQL
 
 import Cardano.Api qualified as C
@@ -33,7 +35,8 @@ import Ouroboros.Consensus.Shelley.Eras qualified as OEra
 
 import Cardano.Ledger.Mary.Value qualified as LM
 
-import RewindableIndex.Index.VSqlite qualified as RewindableIndex
+import RewindableIndex.Index.VSqlite qualified as RI
+import RewindableIndex.Storable qualified as RI
 
 
 -- * Event
@@ -112,26 +115,15 @@ fromAlonzoData = C.fromPlutusData . LA.getPlutusData -- file:/home/iog/src/carda
 
 -- * Sqlite
 
-instance SQL.ToField C.SlotNo where
-  toField f = SQL.toField (coerce f :: Word64)
+-- ** To Sqlite
 
-instance SQL.ToField C.BlockNo where
-  toField f = SQL.toField (coerce f :: Word64)
-
-instance SQL.ToField C.TxId where
-  toField = SQL.toField . C.serialiseToRawBytes
-
-instance SQL.ToField C.PolicyId where
-  toField = SQL.toField . C.serialiseToRawBytes
-
-instance SQL.ToField C.AssetName where
-  toField f = SQL.toField (coerce f :: BS.ByteString)
-
-instance SQL.ToField C.Quantity where
-  toField f = SQL.toField (coerce f :: Integer)
-
-instance SQL.ToField C.ScriptData where
-  toField = SQL.toField . C.serialiseToCBOR
+deriving instance SQL.ToField C.SlotNo
+deriving instance SQL.ToField C.BlockNo
+deriving instance SQL.ToField C.TxId
+deriving instance SQL.ToField C.PolicyId
+deriving instance SQL.ToField C.AssetName
+deriving instance SQL.ToField C.Quantity
+deriving instance SQL.ToField C.ScriptData
 
 toRows :: TxMintEvent -> [[SQL.SQLData]]
 toRows e = do
@@ -158,33 +150,66 @@ sqliteInit c = liftIO $ SQL.execute_ c
   \ , PolicyId BLOB NOT NULL, AssetName TEXT NOT NULL, Quantity INT NOT NULL, RedeemerIdx INT NOT NULL, RedeemerData BLOB NOT NULL)"
 
 sqliteInsert :: SQL.Connection -> [TxMintEvent] -> IO ()
-sqliteInsert c es = SQL.executeMany c template $ toRows =<< es
+sqliteInsert c es = SQL.executeMany c template $ toRows =<< toList es
   where
     template =
       "INSERT INTO minting_policy_event_table \
       \        (Slot, BlockNumber, TxId, PolicyId, AssetName, Quantity, RedeemerIdx, RedeemerData ) \
       \ VALUES (?   , ?          , ?   , ?       , ?        , ?       , ?          , ? )"
 
+-- ** From Sqlite
+
+deriving instance SQL.FromField C.SlotNo
+deriving instance SQL.FromField C.BlockNo
+deriving instance SQL.FromField C.TxId
+deriving instance SQL.FromField C.PolicyId
+deriving instance SQL.FromField C.AssetName
+deriving instance SQL.FromField C.Quantity
+deriving instance SQL.FromField C.ScriptData
+
+fromRow (slotNo, blockNumber, txId, policyId, assetName, quantity, redeemerIdx, redeemerData) = todo
+
+sqliteSelect :: SQL.Connection -> IO ()
+sqliteSelect sqlCon = do
+  -- [(slotNo, blockNumber, txId, policyId, assetName, quantity, redeemerIdx, redeemerData)] <- SQL.query_ sqlCon everything
+  -- let _ = TxMintEvent slotNo blockNumber [(txId, [MintAsset policyId assetName quantity redeemerIdx redeemerData])]
+  undefined
+  where
+    everything = "SELECT Slot, BlockNumber, TxId, PolicyId, AssetName, Quantity, RedeemerIdx, RedeemerData FROM minting_policy_event_table"
+
+
 -- * Indexer
 
-type Result = ()
-type Query = ()
-type MintBurnIndex = RewindableIndex.SqliteIndex TxMintEvent () Query Result
+data MintBurnHandle = MintBurnHandle SQL.Connection
+type MintBurnIndex2 = RI.State MintBurnHandle
+type instance RI.StorablePoint MintBurnHandle = C.ChainPoint
+type instance RI.StorableMonad MintBurnHandle = IO
+newtype instance RI.StorableEvent MintBurnHandle = MintBurnEvent TxMintEvent
+data instance RI.StorableQuery MintBurnHandle = MintBurnQuery ([TxMintEvent] -> Bool)
+data instance RI.StorableResult MintBurnHandle = MintBurnResult [TxMintEvent]
 
-open :: FilePath -> Int -> IO MintBurnIndex
+instance RI.Queryable MintBurnHandle where
+  queryStorage _qi memoryEvents (MintBurnHandle c) (MintBurnQuery p) = do
+    -- todo just memory events
+    pure $ MintBurnResult $ map coerce $ toList memoryEvents
+
+instance RI.HasPoint (RI.StorableEvent MintBurnHandle) C.ChainPoint where
+  getPoint = error "RI.HasPoint"
+
+instance RI.Buffered MintBurnHandle where
+  persistToStorage events h@(MintBurnHandle sqlCon) = do
+    sqliteInsert sqlCon (map coerce $ toList events)
+    pure h
+
+instance RI.Resumable MintBurnHandle where -- todo
+  resumeFromStorage = error "RIStorable.Resumable MintBurnHandle"
+
+instance RI.Rewindable MintBurnHandle where -- todo
+  rewindStorage = error "RI.Rewindable MintBurnHandle"
+
+
+open :: FilePath -> Int -> IO MintBurnIndex2
 open dbPath k = do
-  indexer <- fromJust <$> RewindableIndex.newBoxed query store onInsert k ((k + 1) * 2) dbPath
-  sqliteInit $ indexer ^. RewindableIndex.handle
-  pure indexer
-
-  where
-    store :: MintBurnIndex -> IO ()
-    store indexer = do
-      buffered <- RewindableIndex.getBuffer $ indexer ^. RewindableIndex.storage
-      sqliteInsert (indexer^.RewindableIndex.handle) buffered
-
-    query :: MintBurnIndex -> Query -> [TxMintEvent] -> IO Result
-    query _ _ _ = pure ()
-
-    onInsert :: MintBurnIndex -> TxMintEvent -> IO [()]
-    onInsert _ _ = pure []
+  sqlCon <- SQL.open dbPath
+  sqliteInit sqlCon
+  RI.emptyState k (MintBurnHandle sqlCon)
