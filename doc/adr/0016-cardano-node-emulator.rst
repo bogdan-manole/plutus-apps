@@ -81,4 +81,3 @@ Notes
 -----
 
 This ADR is addressed in PR `#831 <https://github.com/input-output-hk/plutus-apps/pull/831>`_.
-
